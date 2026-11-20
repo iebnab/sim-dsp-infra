@@ -1,0 +1,150 @@
+# IaC and CI assessment for a customer repository (`sim-dsp-infra`).
+#
+# Copy of `.github/workflows/iac.yml` in the customer repository. It runs on a push to
+# `main` and on a schedule every 12 hours, inside one collection interval of the
+# platform (a day), so drift, divergence and workflow evidence renew on an unchanged
+# repository. It has no pull_request trigger: a fork's pull request never runs it and
+# never gets its Google Cloud or ingest credential, and both credentials are bound to
+# `refs/heads/main` and this workflow's workflow_ref besides.
+#
+#   roots     -> one job per declared Terraform root (vars.IAC_ROOTS, the same list as the
+#                platform's declared inventory): Google Cloud through the GitHub OIDC
+#                workload identity provider (no JSON key), a locked plan to a file, Trivy
+#                config, results uploaded
+#   workflows -> zizmor and the ci:publish_requires_scan rule over .github/workflows,
+#                results uploaded
+#
+# The platform's ingest is reachable only over the tailnet (no public ingress), so each
+# job joins as an ephemeral node tagged `tag:ci` through Tailscale's Action (OAuth
+# client in the TS_OAUTH_CLIENT_ID and TS_OAUTH_SECRET secrets, Tailscale client and
+# tarball sha256 pinned) before the Action uploads.
+#
+# The Action is checked out from the platform's published Action repository
+# (iebnab/sim-iac-action) at a full commit SHA and run from that local copy; moving to a
+# new Action release is a reviewed change to that SHA here. Every other Action is
+# pinned to a full commit SHA.
+name: iac
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */12 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iac-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  INGEST_URL: ${{ vars.INGEST_URL }}
+  INGEST_AUDIENCE: ${{ vars.INGEST_AUDIENCE }}
+
+jobs:
+  roots:
+    if: vars.IAC_ROOTS != '' && vars.IAC_ROOTS != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        root: ${{ fromJSON(vars.IAC_ROOTS || '[]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: iebnab/sim-iac-action
+          ref: a5c6a17f3d6433b9d69821735b30352d303812bd
+          path: .iac-action
+          persist-credentials: false
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+      - name: Join the tailnet as an ephemeral tag:ci node
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: "1.104.4"
+          sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+      - uses: ./.iac-action/deploy/ci-integration/github/iac-action
+        with:
+          class: iac
+          root: ${{ matrix.root }}
+          ingest-url: ${{ env.INGEST_URL }}
+          ingest-audience: ${{ env.INGEST_AUDIENCE }}
+
+  config:
+    if: vars.IAC_CONFIG_ROOTS != '' && vars.IAC_CONFIG_ROOTS != '[]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        root: ${{ fromJSON(vars.IAC_CONFIG_ROOTS || '[]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: iebnab/sim-iac-action
+          ref: a5c6a17f3d6433b9d69821735b30352d303812bd
+          path: .iac-action
+          persist-credentials: false
+      - name: Join the tailnet as an ephemeral tag:ci node
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: "1.104.4"
+          sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+      - uses: ./.iac-action/deploy/ci-integration/github/iac-action
+        with:
+          class: iac
+          root: ${{ matrix.root }}
+          plan-mode: config-only
+          ingest-url: ${{ env.INGEST_URL }}
+          ingest-audience: ${{ env.INGEST_AUDIENCE }}
+
+  workflows:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: iebnab/sim-iac-action
+          ref: a5c6a17f3d6433b9d69821735b30352d303812bd
+          path: .iac-action
+          persist-credentials: false
+      - name: Join the tailnet as an ephemeral tag:ci node
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: "1.104.4"
+          sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+      - uses: ./.iac-action/deploy/ci-integration/github/iac-action
+        with:
+          class: ci
+          ingest-url: ${{ env.INGEST_URL }}
+          ingest-audience: ${{ env.INGEST_AUDIENCE }}
